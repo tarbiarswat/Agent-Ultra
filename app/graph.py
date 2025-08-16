@@ -1,7 +1,7 @@
 # app/graph.py
 from dataclasses import dataclass, field
 from typing import List, Dict, Any, Optional
-import requests, json, re, os
+import requests, json, os
 
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434/api/chat")
 MODEL = os.getenv("AGENT_MODEL", "llama3.1:8b")
@@ -11,7 +11,7 @@ class Step:
     thought: str
     action: str
     args: Dict[str, Any] = field(default_factory=dict)
-    result: Optional[str] = None
+    result: Optional[Dict[str, Any]] = None
 
 @dataclass
 class AgentState:
@@ -21,103 +21,61 @@ class AgentState:
 
 SYSTEM = (
     "You are a local automation agent.\n"
-    "Respond with ONE and ONLY ONE JSON object. No prose, no extra JSON blocks, no code fences.\n"
-    'Schema: {"thought": string, "action": string, "args": object}. '
-    "Available actions: open_url(url), click(text_or_selector), type(text), wait(seconds), read_page(). "
-    "Perform exactly ONE action per reply."
+    "Respond with ONE and ONLY ONE JSON object (no prose, no code fences).\n"
+    'Schema: {"thought": string, "action": string, "args": object}.\n'
+    "Allowed actions: open_url(url), click(text_or_selector), type(text), wait(seconds), read_page(), finish().\n"
+    "Rules: Do exactly ONE action per reply. Never repeat the same action+args twice in a row. "
+    "Use finish() ONLY when the user goal is satisfied. Prefer read_page() after navigation.\n"
 )
 
-
-
-def _extract_json(text: str) -> Dict[str, Any]:
-    """
-    Return the FIRST valid JSON object found in 'text' by scanning for a balanced
-    {...} block. Works even if the model outputs multiple JSON objects concatenated
-    with newlines or extra prose.
-    """
-    if not text:
-        raise ValueError("Empty LLM response")
-
-    import json
-
-    # find first '{'
+def _first_json(text:str) -> Dict[str,Any]:
+    if not text: raise ValueError("Empty LLM response")
     start = text.find("{")
-    if start == -1:
-        raise ValueError("No JSON object found")
-
-    depth = 0
-    in_string = False
-    escape = False
-
-    for i in range(start, len(text)):
-        ch = text[i]
-
-        if in_string:
-            if escape:
-                escape = False
-            elif ch == "\\":
-                escape = True
-            elif ch == '"':
-                in_string = False
+    if start < 0: raise ValueError("No JSON object found")
+    depth = 0; in_str=False; esc=False
+    for i,ch in enumerate(text[start:], start):
+        if in_str:
+            if esc: esc=False
+            elif ch=="\\": esc=True
+            elif ch=='"': in_str=False
             continue
-
-        # not inside a string
-        if ch == '"':
-            in_string = True
-            continue
-        if ch == "{":
-            depth += 1
-        elif ch == "}":
-            depth -= 1
-            if depth == 0:
-                segment = text[start:i + 1]
-                return json.loads(segment)
-
-    raise ValueError("Unbalanced JSON braces in LLM output")
-
-
+        if ch=='"': in_str=True
+        elif ch=='{': depth+=1
+        elif ch=='}':
+            depth-=1
+            if depth==0:
+                return json.loads(text[start:i+1])
+    raise ValueError("Unbalanced JSON")
 
 def call_ollama(messages, model: str = MODEL) -> str:
-    # Force non-streaming so we always get a single JSON payload back
-    payload = {
-    "model": model,
-    "messages": messages,
-    "stream": False,
-    "options": {"temperature": 0.0}
-    }
-
+    payload = {"model": model, "messages": messages, "stream": False, "options": {"temperature": 0.0}}
     r = requests.post(OLLAMA_URL, json=payload, timeout=120)
     r.raise_for_status()
     data = r.json()
-    # Some servers return {"message":{"content": "..."}}
     return data.get("message", {}).get("content", "")
 
-def next_step(goal: str, history: List[Dict[str, str]]) -> Step:
-    messages = [{"role": "system", "content": SYSTEM}]
+def next_step(goal: str, history: List[Dict[str,str]]) -> Step:
+    messages = [{"role":"system","content":SYSTEM}]
     messages += history
-    messages.append({"role": "user", "content": f"Goal: {goal}\nReturn only JSON."})
+    messages.append({"role":"user","content":f"USER GOAL: {goal}\nReturn only one JSON object for your next single action."})
 
     raw = call_ollama(messages)
-    print("\n[LLM RAW OUTPUT]\n", raw, "\n")
-
+    # print raw for debugging if you want
+    # print("\n[LLM RAW OUTPUT]\n", raw, "\n")
     try:
-        obj = _extract_json(raw)
+        obj = _first_json(raw)
     except Exception:
-        # Ask the model to repair by returning pure JSON for the same intent
         repair = call_ollama(
-            [
-                {"role": "system", "content": "Return a valid JSON object only. No prose. Keys: thought, action, args."},
-                {"role": "user", "content": raw or "(previous response empty)"},
-            ]
+            [{"role":"system","content":"Return ONLY one JSON object. No prose."},
+             {"role":"user","content":raw or "(empty)"}]
         )
-        obj = _extract_json(repair)
+        obj = _first_json(repair)
 
-    # Minimal validation / defaults
-    thought = str(obj.get("thought", "")).strip()
-    action = str(obj.get("action", "")).strip()
-    args = obj.get("args", {}) or {}
-    if not action:
-        # safe fallback to avoid crashing
+    thought = str(obj.get("thought","")).strip()
+    action = str(obj.get("action","")).strip()
+    args   = obj.get("args",{}) or {}
+
+    if action not in {"open_url","click","type","wait","read_page","finish"}:
         action, args = "read_page", {}
 
     return Step(thought=thought, action=action, args=args)

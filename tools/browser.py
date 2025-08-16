@@ -3,7 +3,6 @@ import sys, asyncio
 if sys.platform.startswith("win"):
     asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
 # -------------------------------------------------
-
 from playwright.sync_api import sync_playwright
 
 class BrowserTool:
@@ -15,33 +14,41 @@ class BrowserTool:
 
     def open_url(self, url:str):
         self.page.goto(url, wait_until="domcontentloaded")
-        return f"Opened {url}"
+        return {
+            "status": "ok",
+            "current_url": self.page.url,
+            "title": self.page.title()
+        }
 
     def read_page(self):
         title = self.page.title()
-        body = self.page.inner_text("body")
-        return f"[{title}]\n{body[:4000]}"
+        text  = self.page.inner_text("body")[:2000]
+        return {
+            "status": "ok",
+            "title": title,
+            "excerpt": text
+        }
 
     def click(self, text_or_selector:str):
         try:
-            # Try text first (role/button/link), fallback to CSS selector
             self.page.get_by_role("button", name=text_or_selector).click(timeout=2000)
-            return f"Clicked button '{text_or_selector}'"
+            where = "role(button)"
         except:
             try:
                 self.page.get_by_text(text_or_selector, exact=False).first.click(timeout=2000)
-                return f"Clicked text '{text_or_selector}'"
+                where = "text"
             except:
                 self.page.click(text_or_selector, timeout=3000)
-                return f"Clicked selector {text_or_selector}"
+                where = "selector"
+        return {"status": "ok", "clicked_via": where, "target": text_or_selector}
 
     def type(self, text:str):
         self.page.keyboard.type(text, delay=20)
-        return "Typed."
+        return {"status": "ok", "typed_len": len(text)}
 
-    def wait(self, seconds:float):
+    def wait(self, seconds:float=1):
         self.page.wait_for_timeout(int(seconds*1000))
-        return f"Waited {seconds}s"
+        return {"status": "ok", "waited_s": seconds}
 
     def close(self):
         self.ctx.close(); self.browser.close(); self.pw.stop()

@@ -20,31 +20,46 @@ class AgentState:
     done: bool = False
 
 SYSTEM = (
-    "You are a local automation agent. "
-    "IMPORTANT: Respond with **only** a single JSON object, no prose, no code fences. "
-    "The JSON MUST have exactly these keys: thought (string), action (string), args (object). "
-    "Available actions: open_url(url), click(text_or_selector), type(text), wait(seconds), read_page(). "
-    "Keep args minimal and valid."
+    "You are a local automation agent.\n"
+    "Return **one and only one** JSON object. No prose, no extra objects, no code fences.\n"
+    "JSON schema: {\"thought\": str, \"action\": str, \"args\": object}.\n"
+    "Available actions: open_url(url), click(text_or_selector), type(text), wait(seconds), read_page().\n"
+    "Do exactly one action per reply."
 )
 
+
 def _extract_json(text: str) -> Dict[str, Any]:
+    """
+    Return the FIRST valid JSON object found in the text.
+    Handles code fences and multiple concatenated JSON objects.
+    """
     if not text:
         raise ValueError("Empty LLM response")
-    # If there are code fences, pick inside them
-    if "```" in text:
-        parts = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S)
-        if parts:
-            return json.loads(parts[0])
-    # Otherwise find first {...} block
-    m = re.search(r"\{.*\}", text, flags=re.S)
-    if m:
-        return json.loads(m.group(0))
-    # Last chance: try direct loads
+
+    # Prefer code-fenced JSON blocks
+    import re, json
+    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S)
+    candidates = fenced if fenced else re.findall(r"\{.*?\}", text, flags=re.S)
+
+    for cand in candidates:
+        try:
+            return json.loads(cand)
+        except Exception:
+            continue
+
+    # Last chance: try direct loads (in case it's already clean)
     return json.loads(text)
+
 
 def call_ollama(messages, model: str = MODEL) -> str:
     # Force non-streaming so we always get a single JSON payload back
-    payload = {"model": model, "messages": messages, "stream": False, "options": {"temperature": 0.2}}
+    payload = {
+    "model": model,
+    "messages": messages,
+    "stream": False,
+    "options": {"temperature": 0.0}
+    }
+
     r = requests.post(OLLAMA_URL, json=payload, timeout=120)
     r.raise_for_status()
     data = r.json()
@@ -57,6 +72,8 @@ def next_step(goal: str, history: List[Dict[str, str]]) -> Step:
     messages.append({"role": "user", "content": f"Goal: {goal}\nReturn only JSON."})
 
     raw = call_ollama(messages)
+    print("\n[LLM RAW OUTPUT]\n", raw, "\n")
+
     try:
         obj = _extract_json(raw)
     except Exception:

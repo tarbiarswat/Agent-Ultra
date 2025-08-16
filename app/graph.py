@@ -21,34 +21,60 @@ class AgentState:
 
 SYSTEM = (
     "You are a local automation agent.\n"
-    "Return **one and only one** JSON object. No prose, no extra objects, no code fences.\n"
-    "JSON schema: {\"thought\": str, \"action\": str, \"args\": object}.\n"
-    "Available actions: open_url(url), click(text_or_selector), type(text), wait(seconds), read_page().\n"
-    "Do exactly one action per reply."
+    "Respond with ONE and ONLY ONE JSON object. No prose, no extra JSON blocks, no code fences.\n"
+    'Schema: {"thought": string, "action": string, "args": object}. '
+    "Available actions: open_url(url), click(text_or_selector), type(text), wait(seconds), read_page(). "
+    "Perform exactly ONE action per reply."
 )
+
 
 
 def _extract_json(text: str) -> Dict[str, Any]:
     """
-    Return the FIRST valid JSON object found in the text.
-    Handles code fences and multiple concatenated JSON objects.
+    Return the FIRST valid JSON object found in 'text' by scanning for a balanced
+    {...} block. Works even if the model outputs multiple JSON objects concatenated
+    with newlines or extra prose.
     """
     if not text:
         raise ValueError("Empty LLM response")
 
-    # Prefer code-fenced JSON blocks
-    import re, json
-    fenced = re.findall(r"```(?:json)?\s*(\{.*?\})\s*```", text, flags=re.S)
-    candidates = fenced if fenced else re.findall(r"\{.*?\}", text, flags=re.S)
+    import json
 
-    for cand in candidates:
-        try:
-            return json.loads(cand)
-        except Exception:
+    # find first '{'
+    start = text.find("{")
+    if start == -1:
+        raise ValueError("No JSON object found")
+
+    depth = 0
+    in_string = False
+    escape = False
+
+    for i in range(start, len(text)):
+        ch = text[i]
+
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
             continue
 
-    # Last chance: try direct loads (in case it's already clean)
-    return json.loads(text)
+        # not inside a string
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                segment = text[start:i + 1]
+                return json.loads(segment)
+
+    raise ValueError("Unbalanced JSON braces in LLM output")
+
 
 
 def call_ollama(messages, model: str = MODEL) -> str:
